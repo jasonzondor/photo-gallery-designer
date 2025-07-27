@@ -1,22 +1,13 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import html2canvas from 'html2canvas';
-import { jsPDF } from 'jspdf';
+import jsPDF from 'jspdf';
+import { Gallery } from '../types/Gallery';
+import IndexedDBStorage, { CachedImage } from '../utils/indexedDBStorage';
 
 // Image processing utilities
 const MAX_IMAGE_SIZE = 2048; // Maximum width/height for processed images
 const THUMBNAIL_SIZE = 200; // Size for library thumbnails
 const CACHE_PREFIX = 'photo-gallery-cache-';
-const CACHE_EXPIRY = 7 * 24 * 60 * 60 * 1000; // 7 days in milliseconds
-
-interface CachedImage {
-  id: string;
-  originalName: string;
-  processedUrl: string;
-  thumbnailUrl: string;
-  timestamp: number;
-  originalSize: { width: number; height: number };
-  processedSize: { width: number; height: number };
-}
 
 // Canvas-based image resizing function
 const resizeImage = (file: File, maxSize: number): Promise<{ dataUrl: string; width: number; height: number }> => {
@@ -67,57 +58,28 @@ const getCacheKey = (fileName: string, fileSize: number, lastModified: number): 
   return `${CACHE_PREFIX}${fileName}-${fileSize}-${lastModified}`;
 };
 
-const getCachedImage = (cacheKey: string): CachedImage | null => {
+const getCachedImage = async (cacheKey: string): Promise<CachedImage | null> => {
   try {
-    const cached = localStorage.getItem(cacheKey);
-    if (!cached) return null;
-    
-    const cachedImage: CachedImage = JSON.parse(cached);
-    
-    // Check if cache has expired
-    if (Date.now() - cachedImage.timestamp > CACHE_EXPIRY) {
-      localStorage.removeItem(cacheKey);
-      return null;
-    }
-    
-    return cachedImage;
+    return await IndexedDBStorage.getCachedImage(cacheKey);
   } catch (error) {
     console.warn('Error reading from cache:', error);
     return null;
   }
 };
 
-const setCachedImage = (cacheKey: string, cachedImage: CachedImage): void => {
+const setCachedImage = async (cacheKey: string, cachedImage: CachedImage): Promise<void> => {
   try {
-    localStorage.setItem(cacheKey, JSON.stringify(cachedImage));
+    await IndexedDBStorage.cacheImage(cachedImage);
   } catch (error) {
     console.warn('Error writing to cache:', error);
-    // If localStorage is full, try to clear old entries
-    clearOldCacheEntries();
-  }
-};
-
-const clearOldCacheEntries = (): void => {
-  try {
-    const keysToRemove: string[] = [];
-    
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith(CACHE_PREFIX)) {
-        try {
-          const cached = JSON.parse(localStorage.getItem(key) || '');
-          if (Date.now() - cached.timestamp > CACHE_EXPIRY) {
-            keysToRemove.push(key);
-          }
-        } catch {
-          keysToRemove.push(key);
-        }
-      }
+    // Try to clear old cache and retry
+    try {
+      await IndexedDBStorage.clearOldCache();
+      await IndexedDBStorage.cacheImage(cachedImage);
+      console.log('Successfully cached image after clearing old entries');
+    } catch (retryError) {
+      console.warn('Failed to cache image even after clearing old entries:', retryError);
     }
-    
-    keysToRemove.forEach(key => localStorage.removeItem(key));
-  } catch (error) {
-    console.warn('Error clearing old cache entries:', error);
   }
 };
 
@@ -126,7 +88,7 @@ const processImage = async (file: File): Promise<CachedImage> => {
   const cacheKey = getCacheKey(file.name, file.size, file.lastModified);
   
   // Check cache first
-  const cached = getCachedImage(cacheKey);
+  const cached = await getCachedImage(cacheKey);
   if (cached) {
     return cached;
   }
@@ -137,23 +99,28 @@ const processImage = async (file: File): Promise<CachedImage> => {
     resizeImage(file, THUMBNAIL_SIZE)
   ]);
   
+  // Get original dimensions first
+  const originalImg = new Image();
+  const originalDimensions = await new Promise<{ width: number; height: number }>((resolve) => {
+    originalImg.onload = () => {
+      resolve({ width: originalImg.width, height: originalImg.height });
+    };
+    originalImg.src = URL.createObjectURL(file);
+  });
+  
   const cachedImage: CachedImage = {
-    id: Date.now().toString() + Math.random(),
+    id: cacheKey, // Use cache key as ID for consistency
     originalName: file.name,
     processedUrl: processedResult.dataUrl,
     thumbnailUrl: thumbnailResult.dataUrl,
     timestamp: Date.now(),
-    originalSize: { width: 0, height: 0 }, // Will be set by the original image load
+    fileSize: file.size,
+    originalSize: originalDimensions,
     processedSize: { width: processedResult.width, height: processedResult.height }
   };
   
-  // Get original dimensions
-  const originalImg = new Image();
-  originalImg.onload = () => {
-    cachedImage.originalSize = { width: originalImg.width, height: originalImg.height };
-    setCachedImage(cacheKey, cachedImage);
-  };
-  originalImg.src = URL.createObjectURL(file);
+  // Cache the processed image
+  await setCachedImage(cacheKey, cachedImage);
   
   return cachedImage;
 };
@@ -467,18 +434,105 @@ const Photo: React.FC<PhotoProps> = ({ id, url, name, x, y, size, isSelected, on
   );
 };
 
-const PhotoCanvas: React.FC = () => {
-  const [photos, setPhotos] = useState<{ id: string; url: string; name: string; x: number; y: number }[]>([]);
-  const [imageLibrary, setImageLibrary] = useState<{ id: string; url: string; name: string; thumbnailUrl?: string; originalSize?: { width: number; height: number }; processedSize?: { width: number; height: number } }[]>([]);
-  const [imageSize, setImageSize] = useState<number>(300);
+interface PhotoCanvasProps {
+  gallery: Gallery;
+  onBackToGalleries: () => void;
+}
+
+const PhotoCanvas: React.FC<PhotoCanvasProps> = ({ gallery, onBackToGalleries }) => {
+  const [currentGallery, setCurrentGallery] = useState<Gallery>(gallery);
+  const [photos, setPhotos] = useState<{ id: string; url: string; name: string; x: number; y: number }[]>(gallery.photos);
+  const [imageLibrary, setImageLibrary] = useState<{ id: string; url: string; name: string; thumbnailUrl?: string; originalSize?: { width: number; height: number }; processedSize?: { width: number; height: number } }[]>(gallery.imageLibrary);
+  const [imageSize, setImageSize] = useState<number>(gallery.settings.imageSize);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(null);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false);
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [lastSaved, setLastSaved] = useState<Date | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
 
-  // Clean up old cache entries on component mount
+  // Initialize IndexedDB and migrate data on component mount
   useEffect(() => {
-    clearOldCacheEntries();
+    const initializeStorage = async () => {
+      try {
+        // Migrate data from localStorage if needed
+        await IndexedDBStorage.migrateFromLocalStorage();
+        // Clear old cache entries
+        await IndexedDBStorage.clearOldCache();
+      } catch (error) {
+        console.error('Error initializing storage:', error);
+      }
+    };
+    initializeStorage();
   }, []);
+
+  // Save gallery changes
+  const saveGallery = useCallback(async (isManual: boolean = false) => {
+    if (isSaving) return; // Prevent multiple simultaneous saves
+    
+    setIsSaving(true);
+    
+    try {
+      const updatedGallery: Gallery = {
+        ...currentGallery,
+        photos,
+        imageLibrary,
+        settings: {
+          ...currentGallery.settings,
+          imageSize
+        },
+        updatedAt: new Date()
+      };
+      
+      // Update metadata
+      updatedGallery.metadata.photoCount = photos.length;
+      updatedGallery.metadata.libraryCount = imageLibrary.length;
+      
+      await IndexedDBStorage.saveGallery(updatedGallery);
+      setCurrentGallery(updatedGallery);
+      setHasUnsavedChanges(false);
+      setLastSaved(new Date());
+      
+      if (isManual) {
+        // Show brief success feedback for manual saves
+        setTimeout(() => {
+          // Could add a toast notification here in the future
+        }, 100);
+      }
+    } catch (error) {
+      console.error('Error saving gallery:', error);
+      if (isManual) {
+        if (error instanceof Error && error.message.includes('Storage is full')) {
+          alert('Storage is full! Please delete some galleries or clear browser data to free up space.');
+        } else {
+          alert('Failed to save gallery. Please try again.');
+        }
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  }, [currentGallery, photos, imageLibrary, imageSize, isSaving]);
+
+  // Manual save function
+  const handleManualSave = useCallback(() => {
+    saveGallery(true);
+  }, [saveGallery]);
+
+  // Auto-save when data changes (debounced)
+  useEffect(() => {
+    if (hasUnsavedChanges) {
+      const timeoutId = setTimeout(() => {
+        saveGallery();
+      }, 1000); // Save after 1 second of inactivity
+      
+      return () => clearTimeout(timeoutId);
+    }
+  }, [hasUnsavedChanges, saveGallery]);
+
+  // Mark as having unsaved changes when data changes
+  useEffect(() => {
+    setHasUnsavedChanges(true);
+  }, [photos, imageLibrary, imageSize]);
 
   // Photo deletion handler
   const handlePhotoDelete = useCallback((id: string) => {
@@ -606,7 +660,8 @@ const PhotoCanvas: React.FC = () => {
       } as any);
 
       const link = document.createElement('a');
-      link.download = 'gallery-export.jpg';
+      const filename = `${currentGallery.name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}-export.jpg`;
+      link.download = filename;
       link.href = canvas.toDataURL('image/jpeg', 0.9);
       link.click();
     } catch (error) {
@@ -641,7 +696,8 @@ const PhotoCanvas: React.FC = () => {
       const imgY = (pdfHeight - imgHeight * ratio) / 2;
 
       pdf.addImage(imgData, 'JPEG', imgX, imgY, imgWidth * ratio, imgHeight * ratio);
-      pdf.save('gallery-export.pdf');
+      const filename = `${currentGallery.name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}-export.pdf`;
+      pdf.save(filename);
     } catch (error) {
       console.error('Error exporting as PDF:', error);
       alert('Failed to export as PDF. Please try again.');
@@ -660,6 +716,73 @@ const PhotoCanvas: React.FC = () => {
       </style>
       <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
       <div style={{ padding: '20px', backgroundColor: '#f5f5f5', display: 'flex', alignItems: 'center', gap: '20px', flexWrap: 'wrap' }}>
+        {/* Back button and gallery info */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+          <button
+            onClick={onBackToGalleries}
+            style={{
+              padding: '8px 12px',
+              backgroundColor: '#6c757d',
+              color: 'white',
+              border: 'none',
+              borderRadius: '6px',
+              fontSize: '14px',
+              fontWeight: '500',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = '#545b62';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = '#6c757d';
+            }}
+          >
+            ← Back to Galleries
+          </button>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            <h2 style={{ margin: '0', fontSize: '18px', fontWeight: 'bold', color: '#212529' }}>
+              {currentGallery.name}
+            </h2>
+            <div style={{ fontSize: '12px', color: '#6c757d', display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span>{photos.length} photos on canvas</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  onClick={handleManualSave}
+                  disabled={isSaving || !hasUnsavedChanges}
+                  style={{
+                    padding: '4px 8px',
+                    backgroundColor: hasUnsavedChanges ? '#28a745' : '#e9ecef',
+                    color: hasUnsavedChanges ? 'white' : '#6c757d',
+                    border: 'none',
+                    borderRadius: '3px',
+                    cursor: hasUnsavedChanges ? 'pointer' : 'not-allowed',
+                    fontSize: '11px',
+                    fontWeight: '500',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    opacity: isSaving ? 0.7 : 1,
+                    transition: 'all 0.2s ease'
+                  }}
+                >
+                  {isSaving ? '💾 Saving...' : hasUnsavedChanges ? '💾 Save' : '✓ Saved'}
+                </button>
+                <span style={{ 
+                  color: isSaving ? '#ffc107' : hasUnsavedChanges ? '#dc3545' : '#28a745',
+                  fontWeight: '500',
+                  fontSize: '11px'
+                }}>
+                  {isSaving ? 'Saving...' : 
+                   hasUnsavedChanges ? 'Unsaved changes' :
+                   lastSaved ? `Saved ${lastSaved.toLocaleTimeString()}` : 'Auto-save on'}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <input
             type="file"
