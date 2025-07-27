@@ -327,20 +327,27 @@ interface PhotoProps {
   x: number;
   y: number;
   size: number;
+  isSelected: boolean;
   onPositionChange: (id: string, x: number, y: number) => void;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
 }
 
-const Photo: React.FC<PhotoProps> = ({ id, url, name, x, y, size, onPositionChange }) => {
+const Photo: React.FC<PhotoProps> = ({ id, url, name, x, y, size, isSelected, onPositionChange, onSelect, onDelete }) => {
   const [isDragging, setIsDragging] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [initialPos, setInitialPos] = useState({ x: 0, y: 0 });
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    // Select the photo when clicked
+    onSelect(id);
+    
     setIsDragging(true);
     setDragStart({ x: e.clientX, y: e.clientY });
     setInitialPos({ x, y });
     e.preventDefault();
-  }, [x, y]);
+  }, [x, y, id, onSelect]);
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!isDragging) return;
@@ -354,6 +361,12 @@ const Photo: React.FC<PhotoProps> = ({ id, url, name, x, y, size, onPositionChan
   const handleMouseUp = useCallback(() => {
     setIsDragging(false);
   }, []);
+
+  const handleDeleteClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    onDelete(id);
+  }, [id, onDelete]);
 
   React.useEffect(() => {
     if (isDragging) {
@@ -376,6 +389,8 @@ const Photo: React.FC<PhotoProps> = ({ id, url, name, x, y, size, onPositionChan
         userSelect: 'none',
       }}
       onMouseDown={handleMouseDown}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
     >
       <img
         src={url}
@@ -384,10 +399,11 @@ const Photo: React.FC<PhotoProps> = ({ id, url, name, x, y, size, onPositionChan
           maxWidth: `${size}px`,
           maxHeight: `${size}px`,
           objectFit: 'cover',
-          border: '2px solid #ccc',
+          border: `2px solid ${isSelected ? '#007bff' : (isHovered ? '#6c757d' : '#ccc')}`,
           borderRadius: '4px',
           pointerEvents: 'none',
           display: 'block',
+          transition: 'border-color 0.2s ease',
         }}
       />
       <div
@@ -408,6 +424,45 @@ const Photo: React.FC<PhotoProps> = ({ id, url, name, x, y, size, onPositionChan
       >
         {name}
       </div>
+      
+      {/* Delete button - shows on hover or selection */}
+      {(isHovered || isSelected) && (
+        <button
+          onClick={handleDeleteClick}
+          style={{
+            position: 'absolute',
+            top: '-8px',
+            right: '-8px',
+            width: '24px',
+            height: '24px',
+            borderRadius: '50%',
+            border: 'none',
+            backgroundColor: '#dc3545',
+            color: 'white',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: '14px',
+            fontWeight: 'bold',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+            zIndex: 10,
+            pointerEvents: 'auto',
+            transition: 'all 0.2s ease',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.backgroundColor = '#c82333';
+            e.currentTarget.style.transform = 'scale(1.1)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = '#dc3545';
+            e.currentTarget.style.transform = 'scale(1)';
+          }}
+          title="Delete photo"
+        >
+          ×
+        </button>
+      )}
     </div>
   );
 };
@@ -417,12 +472,46 @@ const PhotoCanvas: React.FC = () => {
   const [imageLibrary, setImageLibrary] = useState<{ id: string; url: string; name: string; thumbnailUrl?: string; originalSize?: { width: number; height: number }; processedSize?: { width: number; height: number } }[]>([]);
   const [imageSize, setImageSize] = useState<number>(300);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
 
   // Clean up old cache entries on component mount
   useEffect(() => {
     clearOldCacheEntries();
   }, []);
+
+  // Photo deletion handler
+  const handlePhotoDelete = useCallback((id: string) => {
+    // Show confirmation dialog
+    const photo = photos.find(p => p.id === id);
+    if (photo && window.confirm(`Are you sure you want to remove "${photo.name}" from the canvas?`)) {
+      setPhotos((prev) => prev.filter((photo) => photo.id !== id));
+      // Clear selection if deleted photo was selected
+      if (selectedPhotoId === id) {
+        setSelectedPhotoId(null);
+      }
+    }
+  }, [photos, selectedPhotoId]);
+
+  // Handle keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedPhotoId) {
+          e.preventDefault();
+          handlePhotoDelete(selectedPhotoId);
+        }
+      }
+      if (e.key === 'Escape') {
+        setSelectedPhotoId(null);
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [selectedPhotoId, handlePhotoDelete]);
 
   const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
@@ -494,6 +583,17 @@ const PhotoCanvas: React.FC = () => {
         photo.id === id ? { ...photo, x, y } : photo
       )
     );
+  };
+
+  const handlePhotoSelect = (id: string) => {
+    setSelectedPhotoId(id);
+  };
+
+  const handleCanvasClick = (e: React.MouseEvent) => {
+    // Only deselect if clicking on the canvas background (not on a photo)
+    if (e.target === e.currentTarget) {
+      setSelectedPhotoId(null);
+    }
   };
 
   const exportAsJPG = async () => {
@@ -609,6 +709,25 @@ const PhotoCanvas: React.FC = () => {
           />
           <span style={{ minWidth: '50px', fontWeight: 'bold' }}>{imageSize}px</span>
         </div>
+        
+        {/* Status message */}
+        <div style={{ 
+          fontSize: '12px', 
+          color: '#6c757d',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '15px'
+        }}>
+          {selectedPhotoId ? (
+            <span style={{ color: '#007bff', fontWeight: '500' }}>
+              Selected: {photos.find(p => p.id === selectedPhotoId)?.name} 
+              <span style={{ marginLeft: '8px', color: '#6c757d' }}>(Press Delete to remove, Esc to deselect)</span>
+            </span>
+          ) : (
+            <span>Click a photo to select • Hover for delete button • Drag to move</span>
+          )}
+        </div>
+        
         <div style={{ display: 'flex', gap: '10px', marginLeft: 'auto' }}>
           <button
             onClick={exportAsJPG}
@@ -715,6 +834,7 @@ const PhotoCanvas: React.FC = () => {
             overflow: 'auto',
             padding: '20px',
           }}
+          onClick={handleCanvasClick}
         >
           {photos.map((photo) => (
             <Photo
@@ -725,7 +845,10 @@ const PhotoCanvas: React.FC = () => {
               x={photo.x}
               y={photo.y}
               size={imageSize}
+              isSelected={selectedPhotoId === photo.id}
               onPositionChange={handlePositionChange}
+              onSelect={handlePhotoSelect}
+              onDelete={handlePhotoDelete}
             />
           ))}
         </div>

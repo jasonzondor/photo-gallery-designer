@@ -15,6 +15,12 @@ A professional-grade web application for creating custom photo gallery layouts w
 - **🎯 Drag & Drop**: Drag photos from the sidebar directly to your desired canvas position
 - **📏 Configurable Sizing**: Adjust all photo sizes simultaneously with a slider (50px - 600px)
 - **🖱️ Intuitive Interface**: Click to add photos at random positions or drag for precise placement
+- **🎯 Photo Selection**: Click any photo to select it with visual feedback (blue border)
+- **🗑️ Photo Removal**: Multiple ways to remove photos from canvas
+  - Hover over photos to reveal delete button
+  - Select photo and press Delete/Backspace key
+  - Right-click context menu (coming soon)
+- **⌨️ Keyboard Shortcuts**: Delete/Backspace to remove, Escape to deselect
 - **⚡ Real-time Updates**: Instant visual feedback as you design your gallery
 - **📱 Responsive Design**: Clean, modern UI that works across different screen sizes
 
@@ -69,9 +75,16 @@ npm start
 
 4. **Arrange Photos**: Drag photos around the canvas to create your perfect layout
 
-5. **Customize Size**: Use the size slider to adjust all photos simultaneously (50px - 600px)
+5. **Select and Remove Photos**:
+   - Click any photo to select it (blue border appears)
+   - Hover over photos to see the red delete button (×)
+   - Press Delete or Backspace key to remove selected photo
+   - Press Escape to deselect current photo
+   - Confirmation dialog prevents accidental deletions
 
-6. **Export Your Gallery**:
+6. **Customize Size**: Use the size slider to adjust all photos simultaneously (50px - 600px)
+
+7. **Export Your Gallery**:
    - Click "Export as JPG" for a high-quality JPEG image
    - Click "Export as PDF" for a professional PDF document
    - Both exports include photo filenames and maintain quality
@@ -109,12 +122,19 @@ src/
 ### User Experience
 - **Processing Indicators**: Visual feedback with spinner animations during image upload
 - **Dimension Display**: Shows original → processed image sizes
+- **Photo Selection**: Visual selection with blue borders and hover effects
+- **Interactive Deletion**: Hover-to-reveal delete buttons with confirmation dialogs
+- **Keyboard Navigation**: Full keyboard support for selection and deletion
+- **Status Messages**: Real-time feedback showing selected photos and available actions
 - **Fallback Handling**: Graceful degradation if image processing fails
 - **Disabled States**: UI elements disabled during processing to prevent conflicts
 
 ### Technical Architecture
 - **React 18 Compatible**: Custom drag implementation without deprecated APIs
 - **Type Safe**: Full TypeScript support with comprehensive interfaces
+- **State Management**: Efficient photo selection and deletion state handling
+- **Event System**: Proper event propagation and keyboard listener management
+- **Component Architecture**: Modular design with clear separation of concerns
 - **Responsive Layout**: Flexbox-based layout that adapts to screen sizes
 - **Separate Scrolling**: Independent scroll areas for library and canvas
 - **Error Boundaries**: Robust error handling throughout the application
