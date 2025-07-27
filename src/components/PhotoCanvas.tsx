@@ -1,9 +1,165 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 
+// Image processing utilities
+const MAX_IMAGE_SIZE = 2048; // Maximum width/height for processed images
+const THUMBNAIL_SIZE = 200; // Size for library thumbnails
+const CACHE_PREFIX = 'photo-gallery-cache-';
+const CACHE_EXPIRY = 7 * 24 * 60 * 60 * 1000; // 7 days in milliseconds
+
+interface CachedImage {
+  id: string;
+  originalName: string;
+  processedUrl: string;
+  thumbnailUrl: string;
+  timestamp: number;
+  originalSize: { width: number; height: number };
+  processedSize: { width: number; height: number };
+}
+
+// Canvas-based image resizing function
+const resizeImage = (file: File, maxSize: number): Promise<{ dataUrl: string; width: number; height: number }> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    if (!ctx) {
+      reject(new Error('Could not get canvas context'));
+      return;
+    }
+
+    img.onload = () => {
+      let { width, height } = img;
+      
+      // Calculate new dimensions while maintaining aspect ratio
+      if (width > maxSize || height > maxSize) {
+        if (width > height) {
+          height = (height * maxSize) / width;
+          width = maxSize;
+        } else {
+          width = (width * maxSize) / height;
+          height = maxSize;
+        }
+      }
+      
+      canvas.width = width;
+      canvas.height = height;
+      
+      // Use high-quality image rendering
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      
+      ctx.drawImage(img, 0, 0, width, height);
+      
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+      resolve({ dataUrl, width, height });
+    };
+    
+    img.onerror = () => reject(new Error('Failed to load image'));
+    img.src = URL.createObjectURL(file);
+  });
+};
+
+// Cache management functions
+const getCacheKey = (fileName: string, fileSize: number, lastModified: number): string => {
+  return `${CACHE_PREFIX}${fileName}-${fileSize}-${lastModified}`;
+};
+
+const getCachedImage = (cacheKey: string): CachedImage | null => {
+  try {
+    const cached = localStorage.getItem(cacheKey);
+    if (!cached) return null;
+    
+    const cachedImage: CachedImage = JSON.parse(cached);
+    
+    // Check if cache has expired
+    if (Date.now() - cachedImage.timestamp > CACHE_EXPIRY) {
+      localStorage.removeItem(cacheKey);
+      return null;
+    }
+    
+    return cachedImage;
+  } catch (error) {
+    console.warn('Error reading from cache:', error);
+    return null;
+  }
+};
+
+const setCachedImage = (cacheKey: string, cachedImage: CachedImage): void => {
+  try {
+    localStorage.setItem(cacheKey, JSON.stringify(cachedImage));
+  } catch (error) {
+    console.warn('Error writing to cache:', error);
+    // If localStorage is full, try to clear old entries
+    clearOldCacheEntries();
+  }
+};
+
+const clearOldCacheEntries = (): void => {
+  try {
+    const keysToRemove: string[] = [];
+    
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(CACHE_PREFIX)) {
+        try {
+          const cached = JSON.parse(localStorage.getItem(key) || '');
+          if (Date.now() - cached.timestamp > CACHE_EXPIRY) {
+            keysToRemove.push(key);
+          }
+        } catch {
+          keysToRemove.push(key);
+        }
+      }
+    }
+    
+    keysToRemove.forEach(key => localStorage.removeItem(key));
+  } catch (error) {
+    console.warn('Error clearing old cache entries:', error);
+  }
+};
+
+// Process image with caching
+const processImage = async (file: File): Promise<CachedImage> => {
+  const cacheKey = getCacheKey(file.name, file.size, file.lastModified);
+  
+  // Check cache first
+  const cached = getCachedImage(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
+  // Process the image
+  const [processedResult, thumbnailResult] = await Promise.all([
+    resizeImage(file, MAX_IMAGE_SIZE),
+    resizeImage(file, THUMBNAIL_SIZE)
+  ]);
+  
+  const cachedImage: CachedImage = {
+    id: Date.now().toString() + Math.random(),
+    originalName: file.name,
+    processedUrl: processedResult.dataUrl,
+    thumbnailUrl: thumbnailResult.dataUrl,
+    timestamp: Date.now(),
+    originalSize: { width: 0, height: 0 }, // Will be set by the original image load
+    processedSize: { width: processedResult.width, height: processedResult.height }
+  };
+  
+  // Get original dimensions
+  const originalImg = new Image();
+  originalImg.onload = () => {
+    cachedImage.originalSize = { width: originalImg.width, height: originalImg.height };
+    setCachedImage(cacheKey, cachedImage);
+  };
+  originalImg.src = URL.createObjectURL(file);
+  
+  return cachedImage;
+};
+
 interface LibraryItemProps {
-  image: { id: string; url: string; name: string };
+  image: { id: string; url: string; name: string; thumbnailUrl?: string; originalSize?: { width: number; height: number }; processedSize?: { width: number; height: number } };
   onDragToCanvas: (image: { id: string; url: string; name: string }, x: number, y: number) => void;
   onClick: () => void;
 }
@@ -87,7 +243,7 @@ const LibraryItem: React.FC<LibraryItemProps> = ({ image, onDragToCanvas, onClic
         }}
       >
         <img
-          src={image.url}
+          src={image.thumbnailUrl || image.url}
           alt={image.name}
           style={{
             width: '60px',
@@ -118,7 +274,19 @@ const LibraryItem: React.FC<LibraryItemProps> = ({ image, onDragToCanvas, onClic
             fontSize: '11px',
             color: '#6c757d',
           }}>
-            Click or drag to canvas
+            {image.originalSize ? (
+              <div>
+                {image.originalSize.width}×{image.originalSize.height}
+                {image.processedSize && (
+                  image.originalSize.width !== image.processedSize.width || 
+                  image.originalSize.height !== image.processedSize.height
+                ) && (
+                  <span style={{ color: '#28a745', marginLeft: '4px' }}>↓ {image.processedSize.width}×{image.processedSize.height}</span>
+                )}
+              </div>
+            ) : (
+              'Click or drag to canvas'
+            )}
           </div>
         </div>
       </div>
@@ -136,7 +304,7 @@ const LibraryItem: React.FC<LibraryItemProps> = ({ image, onDragToCanvas, onClic
           }}
         >
           <img
-            src={image.url}
+            src={image.thumbnailUrl || image.url}
             alt={image.name}
             style={{
               width: '100px',
@@ -246,29 +414,67 @@ const Photo: React.FC<PhotoProps> = ({ id, url, name, x, y, size, onPositionChan
 
 const PhotoCanvas: React.FC = () => {
   const [photos, setPhotos] = useState<{ id: string; url: string; name: string; x: number; y: number }[]>([]);
-  const [imageLibrary, setImageLibrary] = useState<{ id: string; url: string; name: string }[]>([]);
+  const [imageLibrary, setImageLibrary] = useState<{ id: string; url: string; name: string; thumbnailUrl?: string; originalSize?: { width: number; height: number }; processedSize?: { width: number; height: number } }[]>([]);
   const [imageSize, setImageSize] = useState<number>(300);
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const canvasRef = useRef<HTMLDivElement>(null);
 
-  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  // Clean up old cache entries on component mount
+  useEffect(() => {
+    clearOldCacheEntries();
+  }, []);
+
+  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     if (!files) return;
 
-    Array.from(files).forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result;
-        if (result && typeof result === 'string') {
-          const newImage = {
-            id: Date.now().toString() + Math.random(),
-            url: result,
-            name: file.name,
-          };
-          setImageLibrary((prev) => [...prev, newImage]);
-        }
-      };
-      reader.readAsDataURL(file);
-    });
+    setIsProcessing(true);
+    const fileArray = Array.from(files);
+    
+    try {
+      // Process images in parallel
+      const processedImages = await Promise.all(
+        fileArray.map(async (file) => {
+          try {
+            const cachedImage = await processImage(file);
+            return {
+              id: cachedImage.id,
+              url: cachedImage.processedUrl,
+              name: cachedImage.originalName,
+              thumbnailUrl: cachedImage.thumbnailUrl,
+              originalSize: cachedImage.originalSize,
+              processedSize: cachedImage.processedSize,
+            };
+          } catch (error) {
+            console.error(`Error processing ${file.name}:`, error);
+            // Fallback to original file reading for failed processing
+            return new Promise<any>((resolve) => {
+              const reader = new FileReader();
+              reader.onload = () => {
+                const result = reader.result;
+                if (result && typeof result === 'string') {
+                  resolve({
+                    id: Date.now().toString() + Math.random(),
+                    url: result,
+                    name: file.name,
+                  });
+                }
+              };
+              reader.readAsDataURL(file);
+            });
+          }
+        })
+      );
+      
+      setImageLibrary((prev) => [...prev, ...processedImages]);
+    } catch (error) {
+      console.error('Error processing images:', error);
+      alert('Some images could not be processed. Please try again.');
+    } finally {
+      setIsProcessing(false);
+      // Reset the input value to allow re-uploading the same files
+      event.target.value = '';
+    }
   };
 
   const addPhotoToCanvas = (libraryImage: { id: string; url: string; name: string }, x?: number, y?: number) => {
@@ -343,15 +549,51 @@ const PhotoCanvas: React.FC = () => {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+    <>
+      <style>
+        {`
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+        `}
+      </style>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
       <div style={{ padding: '20px', backgroundColor: '#f5f5f5', display: 'flex', alignItems: 'center', gap: '20px', flexWrap: 'wrap' }}>
-        <input
-          type="file"
-          multiple
-          accept="image/*"
-          onChange={handleImageUpload}
-          style={{ padding: '10px', cursor: 'pointer' }}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <input
+            type="file"
+            multiple
+            accept="image/*"
+            onChange={handleImageUpload}
+            disabled={isProcessing}
+            style={{ 
+              padding: '10px', 
+              cursor: isProcessing ? 'not-allowed' : 'pointer',
+              opacity: isProcessing ? 0.6 : 1
+            }}
+          />
+          {isProcessing && (
+            <div style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: '8px',
+              fontSize: '14px',
+              color: '#007bff',
+              fontWeight: '500'
+            }}>
+              <div style={{
+                width: '16px',
+                height: '16px',
+                border: '2px solid #007bff',
+                borderTop: '2px solid transparent',
+                borderRadius: '50%',
+                animation: 'spin 1s linear infinite'
+              }}></div>
+              Processing images...
+            </div>
+          )}
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <label htmlFor="size-slider" style={{ fontWeight: 'bold', minWidth: '80px' }}>
             Image Size:
@@ -426,6 +668,9 @@ const PhotoCanvas: React.FC = () => {
             <h3 style={{ margin: '0', fontSize: '16px', fontWeight: 'bold', color: '#212529' }}>Photo Library</h3>
             <p style={{ margin: '5px 0 0 0', fontSize: '12px', color: '#6c757d' }}>
               {imageLibrary.length} {imageLibrary.length === 1 ? 'image' : 'images'}
+              {imageLibrary.some(img => img.thumbnailUrl) && (
+                <span style={{ marginLeft: '8px', color: '#28a745' }}>• Optimized</span>
+              )}
             </p>
           </div>
           <div style={{
@@ -485,7 +730,8 @@ const PhotoCanvas: React.FC = () => {
           ))}
         </div>
       </div>
-    </div>
+      </div>
+    </>
   );
 };
 
