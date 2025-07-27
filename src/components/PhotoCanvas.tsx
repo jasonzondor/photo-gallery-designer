@@ -1,4 +1,6 @@
 import React, { useState, useRef, useCallback } from 'react';
+import html2canvas from 'html2canvas';
+import { jsPDF } from 'jspdf';
 
 interface LibraryItemProps {
   image: { id: string; url: string; name: string };
@@ -17,16 +19,16 @@ const LibraryItem: React.FC<LibraryItemProps> = ({ image, onDragToCanvas, onClic
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!isDragging || !dragPreviewRef.current) return;
-    
+
     dragPreviewRef.current.style.left = `${e.clientX - 50}px`;
     dragPreviewRef.current.style.top = `${e.clientY - 50}px`;
   }, [isDragging]);
 
   const handleMouseUp = useCallback((e: MouseEvent) => {
     if (!isDragging) return;
-    
+
     setIsDragging(false);
-    
+
     // Check if dropped on canvas area
     const canvasElement = document.querySelector('[data-canvas="true"]') as HTMLElement;
     if (canvasElement) {
@@ -120,7 +122,7 @@ const LibraryItem: React.FC<LibraryItemProps> = ({ image, onDragToCanvas, onClic
           </div>
         </div>
       </div>
-      
+
       {/* Drag Preview */}
       {isDragging && (
         <div
@@ -153,13 +155,14 @@ const LibraryItem: React.FC<LibraryItemProps> = ({ image, onDragToCanvas, onClic
 interface PhotoProps {
   id: string;
   url: string;
+  name: string;
   x: number;
   y: number;
   size: number;
   onPositionChange: (id: string, x: number, y: number) => void;
 }
 
-const Photo: React.FC<PhotoProps> = ({ id, url, x, y, size, onPositionChange }) => {
+const Photo: React.FC<PhotoProps> = ({ id, url, name, x, y, size, onPositionChange }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [initialPos, setInitialPos] = useState({ x: 0, y: 0 });
@@ -216,14 +219,33 @@ const Photo: React.FC<PhotoProps> = ({ id, url, x, y, size, onPositionChange }) 
           border: '2px solid #ccc',
           borderRadius: '4px',
           pointerEvents: 'none',
+          display: 'block',
         }}
       />
+      <div
+        style={{
+          fontSize: '12px',
+          color: '#333',
+          backgroundColor: 'rgba(255, 255, 255, 0.9)',
+          padding: '2px 6px',
+          borderRadius: '3px',
+          marginTop: '4px',
+          textAlign: 'center',
+          maxWidth: `${size}px`,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          pointerEvents: 'none',
+        }}
+      >
+        {name}
+      </div>
     </div>
   );
 };
 
 const PhotoCanvas: React.FC = () => {
-  const [photos, setPhotos] = useState<{ id: string; url: string; x: number; y: number }[]>([]);
+  const [photos, setPhotos] = useState<{ id: string; url: string; name: string; x: number; y: number }[]>([]);
   const [imageLibrary, setImageLibrary] = useState<{ id: string; url: string; name: string }[]>([]);
   const [imageSize, setImageSize] = useState<number>(300);
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -253,6 +275,7 @@ const PhotoCanvas: React.FC = () => {
     const newPhoto = {
       id: Date.now().toString() + Math.random(),
       url: libraryImage.url,
+      name: libraryImage.name,
       x: x ?? Math.random() * (canvasRef.current?.clientWidth || 800),
       y: y ?? Math.random() * (canvasRef.current?.clientHeight || 600),
     };
@@ -265,6 +288,58 @@ const PhotoCanvas: React.FC = () => {
         photo.id === id ? { ...photo, x, y } : photo
       )
     );
+  };
+
+  const exportAsJPG = async () => {
+    if (!canvasRef.current) return;
+
+    try {
+      const canvas = await html2canvas(canvasRef.current, {
+        background: '#ffffff',
+        scale: 2,
+      } as any);
+
+      const link = document.createElement('a');
+      link.download = 'gallery-export.jpg';
+      link.href = canvas.toDataURL('image/jpeg', 0.9);
+      link.click();
+    } catch (error) {
+      console.error('Error exporting as JPG:', error);
+      alert('Failed to export as JPG. Please try again.');
+    }
+  };
+
+  const exportAsPDF = async () => {
+    if (!canvasRef.current) return;
+
+    try {
+      const canvas = await html2canvas(canvasRef.current, {
+        background: '#ffffff',
+        scale: 2,
+      } as any);
+
+      const imgData = canvas.toDataURL('image/jpeg', 0.9);
+      const pdf = new jsPDF({
+        orientation: canvas.width > canvas.height ? 'landscape' : 'portrait',
+        unit: 'mm',
+        format: 'a4',
+      });
+
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = pdf.internal.pageSize.getHeight();
+      const imgWidth = canvas.width;
+      const imgHeight = canvas.height;
+
+      const ratio = Math.min(pdfWidth / imgWidth, pdfHeight / imgHeight);
+      const imgX = (pdfWidth - imgWidth * ratio) / 2;
+      const imgY = (pdfHeight - imgHeight * ratio) / 2;
+
+      pdf.addImage(imgData, 'JPEG', imgX, imgY, imgWidth * ratio, imgHeight * ratio);
+      pdf.save('gallery-export.pdf');
+    } catch (error) {
+      console.error('Error exporting as PDF:', error);
+      alert('Failed to export as PDF. Please try again.');
+    }
   };
 
   return (
@@ -291,6 +366,50 @@ const PhotoCanvas: React.FC = () => {
             style={{ width: '150px' }}
           />
           <span style={{ minWidth: '50px', fontWeight: 'bold' }}>{imageSize}px</span>
+        </div>
+        <div style={{ display: 'flex', gap: '10px', marginLeft: 'auto' }}>
+          <button
+            onClick={exportAsJPG}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: '#007bff',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '14px',
+              fontWeight: '500',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = '#0056b3';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = '#007bff';
+            }}
+          >
+            Export as JPG
+          </button>
+          <button
+            onClick={exportAsPDF}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: '#28a745',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '14px',
+              fontWeight: '500',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = '#1e7e34';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = '#28a745';
+            }}
+          >
+            Export as PDF
+          </button>
         </div>
       </div>
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
@@ -339,7 +458,7 @@ const PhotoCanvas: React.FC = () => {
             )}
           </div>
         </div>
-        
+
         {/* Canvas */}
         <div
           ref={canvasRef}
@@ -357,6 +476,7 @@ const PhotoCanvas: React.FC = () => {
               key={photo.id}
               id={photo.id}
               url={photo.url}
+              name={photo.name}
               x={photo.x}
               y={photo.y}
               size={imageSize}
